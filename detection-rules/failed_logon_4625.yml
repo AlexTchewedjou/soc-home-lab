@@ -1,0 +1,31 @@
+title: Failed Logon Detected (4625) - Brute Force Component
+id: 8f3d2b1a-4c7e-4a9b-9e21-1c0f5a6d2e35
+status: experimental
+description: |
+  Detects individual failed logon events (Windows Security Event ID 4625).
+  On its own a single 4625 is low signal; this rule is designed to surface
+  every failed logon so that a burst against one account (brute force,
+  MITRE T1110) becomes visible in the timeline. Correlation of the burst
+  (5+ failures in 5 minutes against one account) is performed separately by
+  the companion PowerShell script Detect-BruteForce.ps1, because Hayabusa
+  does not evaluate Sigma count() aggregations.
+references:
+  - https://attack.mitre.org/techniques/T1110/
+  - https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4625
+author: Alex Tchewedjou
+date: 2026-10-27
+tags:
+  - attack.credential-access
+  - attack.t1110
+  - attack.t1110.001
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4625
+  condition: selection
+falsepositives:
+  - A user mistyping their own password
+  - A service account with a stale cached credential
+level: medium

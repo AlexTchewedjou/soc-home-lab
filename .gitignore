@@ -1,0 +1,27 @@
+﻿# Raw event logs and evidence — NEVER commit (contain full system activity)
+*.evtx
+*.pcapng
+*.pcap
+evidence/
+auditpol-backup.csv
+*-backup.csv
+timeline-*.csv
+
+# Hayabusa tool and its logs
+tools/
+hayabusa*/
+logs/errorlog-*.log
+
+# Secrets / credentials
+*.key
+*.pem
+credentials*
+*password*
+*.secret
+
+# OS / editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+~$*
