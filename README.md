@@ -18,7 +18,7 @@ A hands-on Security Operations Center (SOC) home lab that monitors a Windows end
 - [Setup](#setup)
 - [Limitations](#limitations)
 - [Lessons Learned](#lessons-learned)
-- [Roadmap (v2)](#roadmap-v2)
+- [Cloud SIEM (Wazuh)](#cloud-siem-wazuh)
 - [Credits & License](#credits--license)
 
 ---
@@ -29,10 +29,10 @@ This project simulates a mini SOC workflow end to end:
 
 1. Instrument a Windows 11 endpoint with Sysmon, an advanced audit policy, and PowerShell logging.
 2. Generate a **controlled brute-force attack** against a dedicated test account.
-3. Detect it with **Hayabusa** (Sigma rules), a **custom detection rule**, and **Wireshark**.
+3. Detect it four ways: **Hayabusa** (Sigma rules), a **custom detection rule**, **Wireshark**, and a **Wazuh SIEM** running on a hardened cloud server.
 4. Investigate, triage, and document the incident as a SOC analyst would.
 
-A key theme is **honesty about scope**: the default rule set did *not* flag the brute force, so I identified that detection gap and wrote a custom correlation rule to fill it.
+A key theme is **honesty about scope**: the default Hayabusa rule set did *not* flag the brute force, so I identified that detection gap and wrote a custom correlation rule to fill it. Wazuh, by contrast, correlated the same burst natively (rule 60204) — a concrete comparison of two SIEM approaches.
 
 ---
 
@@ -47,39 +47,45 @@ A key theme is **honesty about scope**: the default rule set did *not* flag the 
 - [x] Incident investigation and timeline creation
 - [x] Incident response documentation and remediation recommendations
 - [x] Professional GitHub documentation
-- [ ] Centralized SIEM dashboard (Wazuh) — *planned for v2, see [Roadmap](#roadmap-v2)*
+- [x] Centralized SIEM dashboard (Wazuh) on a hardened cloud server, with the endpoint forwarding live logs
 
 ---
 
 ## Architecture
 
-The lab was designed around a real constraint: **8 GB of RAM**, with only ~2 GB free after cleanup. A traditional multi-VM lab (Kali attacker + Windows victim + Linux SIEM) could not run. The architecture was adapted to a **host-based** design that delivers the same learning outcomes without overloading the machine.
+The lab was designed around a real constraint: **8 GB of RAM**, with only ~2 GB free after cleanup. A traditional multi-VM lab (Kali attacker + Windows victim + Linux SIEM) could not run locally. The architecture was adapted to a **host-based endpoint + cloud SIEM** design that delivers the same outcomes without overloading the laptop.
 
 ```
-                 +--------------------------------------------------+
-                 |          Windows 11 Host (monitored endpoint)    |
-                 |                                                  |
-   Controlled    |   +------------+   +----------------+            |
-   attack  ----->|   |  Sysmon    |   | Audit Policy   |            |
-   (localhost)   |   | (native)   |   | 4625/4740/4688 |            |
-                 |   +-----+------+   +-------+--------+            |
-                 |         |                  |                     |
-                 |         v                  v                     |
-                 |     +---------------------------+                |
-                 |     |   Windows Event Logs      |                |
-                 |     +------------+--------------+                |
-                 |                  |                               |
-                 |      +-----------+-----------+                   |
-                 |      |           |           |                   |
-                 |      v           v           v                   |
-                 |  Hayabusa   Custom rule   Wireshark              |
-                 |  (Sigma)    (PowerShell)  (tshark)               |
-                 +--------------------------------------------------+
-
-   Planned (v2):  Wazuh SIEM on a cloud VM  <---- Wazuh agent forwards logs
+   +--------------------------------------------------+
+   |          Windows 11 Host (monitored endpoint)    |
+   |                                                  |
+   |   +------------+   +----------------+            |
+   |   |  Sysmon    |   | Audit Policy   |            |
+   |   | (native)   |   | 4625/4740/4688 |            |
+   |   +-----+------+   +-------+--------+            |
+   |         |                  |                     |
+   |         v                  v                     |
+   |     +---------------------------+                |
+   |     |   Windows Event Logs      |                |
+   |     +------------+--------------+                |
+   |                  |                               |
+   |      +-----+-----+-----+-------------+           |
+   |      |     |     |     |             |           |
+   |      v     v     v     |   Wazuh agent (TLS)     |
+   |  Hayabusa Custom Wire- |        |                |
+   |  (Sigma)  rule   shark |        |                |
+   +------------------------|--------|-----------------+
+                            |        | ports 1514/1515
+                            |        v   (firewalled to home IP)
+                            |   +-----------------------------+
+                            |   |   Hetzner cloud server      |
+                            |   |   Ubuntu 24.04, 8 GB        |
+                            |   |   Wazuh manager + indexer   |
+                            |   |   + dashboard (HTTPS 443)   |
+                            |   +-----------------------------+
 ```
 
-**Why host-based instead of VMs?** See [`docs/setup-guide.md`](docs/setup-guide.md) for the full RAM assessment and the decision rationale. Security controls (Memory Integrity / VBS, Microsoft Defender) were kept **enabled** throughout.
+**Why this design?** See [`docs/setup-guide.md`](docs/setup-guide.md) for the full RAM assessment and rationale. The local host handles endpoint logging and offline analysis (Hayabusa, Wireshark, the custom rule); a small cloud server runs the full Wazuh SIEM, so the laptop never has to host it. Security controls (Memory Integrity / VBS, Microsoft Defender) were kept **enabled** throughout, and the cloud server's ports are **firewalled to a single home IP** — the dashboard is never exposed to the open internet.
 
 ---
 
@@ -93,6 +99,8 @@ The lab was designed around a real constraint: **8 GB of RAM**, with only ~2 GB 
 | **Hayabusa** (Yamato Security) | Sigma-based log scanner / timeline | Free / OSS |
 | **Custom PowerShell + Sigma rule** | Brute-force correlation | Authored here |
 | **Wireshark / tshark** | Network packet analysis | Free / OSS |
+| **Wazuh 4.14** (manager + indexer + dashboard) | Live SIEM — real-time alerts, MITRE ATT&CK mapping | Free / OSS |
+| **Hetzner Cloud (Ubuntu 24.04)** | Hardened host for the Wazuh server | ~$0.12/hr |
 
 ---
 
@@ -125,12 +133,15 @@ Full write-up: [`incident-reports/sample-incident-report.md`](incident-reports/s
 
 ## Investigation Methodology
 
-Detection used three complementary layers, each reinforcing the others:
+Detection used four complementary layers, each reinforcing the others:
 
 1. **Host logs** show *who* and *what* (failed logons, the lockout).
 2. **Hayabusa** reduced ~36,000 raw events to 7 prioritized detections (>99% data reduction), which were then triaged.
-3. **A custom rule** correlated the failed-logon burst that off-the-shelf rules missed.
+3. **A custom rule** correlated the failed-logon burst that off-the-shelf Hayabusa rules missed.
 4. **Wireshark** showed the attack pattern on the wire (a burst of short-lived connections).
+5. **Wazuh** ingested the same events live and raised them in real time — 8 authentication failures, 0 successes, automatically mapped to **MITRE ATT&CK: Brute Force (T1110)**, and correlated into a single alert by its built-in rule **60204 "Multiple Windows Logon Failures"**.
+
+A useful comparison emerged: Hayabusa's default Sigma rules **could not** correlate the failed-logon burst (which is why I wrote a custom rule), whereas **Wazuh did it natively**. Seeing where each tool succeeds and fails is a core SOC skill.
 
 Triage was done honestly: of 7 raw Hayabusa detections, 5 were **benign true positives** (my own authorized setup) and 2 were **false positives** (a rule matched a legitimate `net accounts` command). Every verdict was verified against the underlying command line.
 
@@ -146,10 +157,14 @@ Screenshots (with hostnames/usernames redacted) are in [`screenshots/`](screensh
 |---|---|
 | `01-sysmon-event-id-1.png` | Sysmon process-creation logging working |
 | `02-event-4625-failed-logon.png` | A failed logon (4625) during the attack |
-| `03-event-4625-lockout.png` | The account-lockout event (4740) |
 | `04b-hayabusa-security-summary.png` | Hayabusa detection summary |
 | `05-bruteforce-detection.png` | Custom rule firing on the attack |
 | `06-wireshark-ssh-bruteforce.png` | Network connection burst to port 22 |
+| `07-wazuh-dashboard-overview.png` | Wazuh SIEM dashboard overview |
+| `08-wazuh-agent-active.png` | Windows endpoint connected to Wazuh (agent active) |
+| `09-wazuh-bruteforce-mitre.png` | Wazuh brute-force detection + MITRE ATT&CK mapping |
+| `09b-wazuh-bruteforce-events.png` | Individual Wazuh alerts (rule 60204 / 60122) |
+| `10-hetzner-server.png` | The hardened Hetzner cloud server running Wazuh |
 
 > Raw event logs (`.evtx`) are **not committed** — they contain full system activity. Only filtered, redacted evidence is published.
 
@@ -200,9 +215,9 @@ Every step in the guide was executed and validated on the lab machine.
 This project is honest about what it is and isn't:
 
 - **The attacker is local (`localhost`), not a separate machine.** The RAM constraint ruled out a dedicated attacker VM. Events show `::1` / `127.0.0.1` as the source. In a real incident this would be an external IP.
-- **No centralized SIEM dashboard yet.** Wazuh is planned for v2 (see below). Detection here uses Hayabusa + a custom script instead.
 - **SSH traffic is encrypted**, so the Wireshark capture shows the *connection pattern*, not the guessed passwords.
-- **Hayabusa cannot evaluate Sigma `count()` aggregations**, which is exactly why the custom PowerShell correlation script exists.
+- **Hayabusa cannot evaluate Sigma `count()` aggregations**, which is exactly why the custom PowerShell correlation script exists (and why Wazuh's native correlation is a useful contrast).
+- **The Wazuh server is a lab deployment.** It uses the installer's self-signed certificate, and its exposure is limited by a host-IP firewall rather than a full production hardening baseline.
 
 These constraints were turned into design decisions and documented, rather than hidden.
 
@@ -213,16 +228,24 @@ These constraints were turned into design decisions and documented, rather than 
 - **Off-the-shelf detection has gaps.** A burst of failed logons needed a custom correlation rule to be flagged. Knowing *what the tools miss* is as important as running them.
 - **Triage is the real skill.** Most alerts were benign or false positives; verifying command lines separated signal from noise.
 - **Detective + preventive controls work together.** Logging made the attack visible; the lockout policy stopped it.
-- **Constraints force good engineering.** Working within 8 GB of RAM produced a leaner, better-understood lab than a copy-paste multi-VM build would have.
+- **Constraints force good engineering.** Working within 8 GB of RAM produced a leaner, better-understood lab than a copy-paste multi-VM build would have — the SIEM moved to a small, firewalled cloud server instead.
+- **The same attack looks different in different tools.** Hayabusa needed a custom rule to flag the brute force; Wazuh correlated it out of the box. Comparing them is more valuable than running just one.
 
 ---
 
-## Roadmap (v2)
+## Cloud SIEM (Wazuh)
 
-- [ ] Deploy **Wazuh** (manager + indexer + dashboard) on a cloud VM.
-- [ ] Install the Wazuh agent on the endpoint and forward Security + Sysmon logs.
+A full Wazuh SIEM was deployed on a hardened Hetzner cloud server (Ubuntu 24.04, 8 GB), and the Windows endpoint was connected as an agent forwarding Security and Sysmon events over TLS.
+
+- **Hardening:** UFW firewall denies all inbound by default; SSH (22), dashboard (443), and agent ports (1514/1515) are each restricted to a single home IP. Key-only SSH, no password login. The dashboard is never exposed to the open internet.
+- **Result:** the controlled brute force appeared in Wazuh in real time — 8 authentication failures, automatically mapped to MITRE ATT&CK Brute Force (T1110) and correlated by built-in rule 60204.
+- See `screenshots/07`–`10` for the dashboard, the active agent, the MITRE mapping, and the server.
+
+### Roadmap (v3)
+
 - [ ] Reproduce the brute force with a **real external source IP** between two cloud hosts.
 - [ ] Capture that network-based attack in Wireshark and correlate it with the Wazuh alert.
+- [ ] Add custom Wazuh rules/decoders and a File Integrity Monitoring scenario.
 
 ---
 
@@ -231,5 +254,6 @@ These constraints were turned into design decisions and documented, rather than 
 - Sysmon configuration baseline: [SwiftOnSecurity/sysmon-config](https://github.com/SwiftOnSecurity/sysmon-config)
 - Detection engine: [Hayabusa by Yamato Security](https://github.com/Yamato-Security/hayabusa)
 - Sigma detection format: [SigmaHQ](https://github.com/SigmaHQ/sigma)
+- SIEM platform: [Wazuh](https://github.com/wazuh/wazuh)
 
 Licensed under the [MIT License](LICENSE). This is a personal learning portfolio project, not professional work experience.

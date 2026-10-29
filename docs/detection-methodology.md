@@ -1,6 +1,6 @@
 # Detection Methodology
 
-This document explains how security events were detected and investigated in this lab, across three complementary layers: host event logs, a SIEM-style log scanner, and network traffic analysis.
+This document explains how security events were detected and investigated in this lab, across four complementary layers: host event logs, a SIEM-style log scanner, network traffic analysis, and a live Wazuh SIEM.
 
 ---
 
@@ -11,8 +11,9 @@ A single data source is rarely enough. This lab combines three layers so that an
 | Layer | Tool | What it sees |
 |---|---|---|
 | **Endpoint / host** | Sysmon + Windows audit policy | Process creation, logons, account changes |
-| **Log analysis / SIEM** | Hayabusa (Sigma rules) + custom PowerShell | Correlated detections across many events |
+| **Offline log analysis** | Hayabusa (Sigma rules) + custom PowerShell | Correlated detections across many events |
 | **Network** | Wireshark / tshark | Connection patterns on the wire |
+| **Live SIEM** | Wazuh (cloud server + endpoint agent) | Real-time alerts, MITRE ATT&CK mapping, native correlation |
 
 ---
 
@@ -98,13 +99,35 @@ SSH is encrypted, so the packet payload does not reveal the attempted passwords.
 
 ---
 
+## 5. Live Detection with Wazuh (SIEM)
+
+A full Wazuh 4.14 SIEM (manager + indexer + dashboard) was deployed on a hardened Hetzner cloud server (Ubuntu 24.04, 8 GB RAM). The Windows endpoint ran the Wazuh agent, forwarding its Security and Sysmon event channels over TLS.
+
+### Deployment & hardening
+- One-line Wazuh installer (`wazuh-install.sh -a`) on a fresh Ubuntu server.
+- **UFW firewall:** default deny inbound; SSH (22), dashboard (443), and agent ports (1514/1515) each restricted to the analyst's single home IP.
+- **Key-only SSH**, no password authentication. Dashboard never exposed to the open internet.
+- Agent installed on the endpoint via MSI, pointed at the manager IP, forwarding `Security` and `Microsoft-Windows-Sysmon/Operational`.
+
+### Result
+The same controlled brute force was replayed. Within seconds Wazuh showed:
+- **8 authentication failures, 0 successes** (the attack failed).
+- Automatic mapping to **MITRE ATT&CK: Brute Force (T1110)**.
+- Built-in rule **60204 "Multiple Windows Logon Failures"** (level 10) correlating the burst into one alert, alongside the individual **60122** logon-failure events (level 5).
+
+### Key comparison
+Hayabusa's default Sigma rules **did not** correlate the failed-logon burst — a custom rule was needed. **Wazuh correlated it natively, out of the box.** Running both shows an understanding of the trade-offs: a lightweight offline scanner vs. a stateful, real-time SIEM.
+
+---
+
 ## Summary
 
 | Attack stage | Detected by |
 |---|---|
 | Account targeted | Host logs (4625) |
-| Burst correlated as brute force | Custom PowerShell rule |
+| Burst correlated as brute force (offline) | Custom PowerShell rule |
+| Burst correlated as brute force (live) | Wazuh rule 60204, auto-mapped to MITRE T1110 |
 | Defensive control confirmed | Host logs (4740) |
 | Network pattern | Wireshark (SYN burst to port 22) |
 
-Each layer reinforces the others: the host logs show *who* and *what*, the custom rule turns raw events into a single alert, and the network capture shows the attack *on the wire*.
+Each layer reinforces the others: the host logs show *who* and *what*, the custom rule and Wazuh turn raw events into single correlated alerts, and the network capture shows the attack *on the wire*.
