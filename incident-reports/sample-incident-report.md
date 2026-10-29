@@ -49,6 +49,7 @@ Logs were collected from the Windows Security channel and analyzed in two passes
 
 1. **Hayabusa** (Sigma-based scanner) was run against the exported event log. It produced detections for configuration changes and discovery activity, but **did not raise a brute-force alert** for the failed-logon burst, because the default rule set does not correlate multiple 4625 events by account within a time window.
 2. A **custom PowerShell correlation script** (`Detect-BruteForce.ps1`) was written to fill this gap. It groups failed logons by target account within a sliding window and alerts when the count meets a threshold.
+3. The attack was later replayed with the endpoint connected to a **Wazuh SIEM**. Wazuh raised it in real time — 8 authentication failures, 0 successes — and, unlike Hayabusa's default rules, **correlated the burst natively** via built-in rule **60204 "Multiple Windows Logon Failures"** (level 10), automatically mapping it to **MITRE ATT&CK T1110 (Brute Force)**. Evidence: `screenshots/09-wazuh-bruteforce-mitre.png`, `screenshots/09b-wazuh-bruteforce-events.png`.
 
 ### 3.2 Custom detection logic
 
@@ -119,7 +120,7 @@ This weakness was remediated before the attack simulation by applying a lockout 
 |---|---|
 | Account lockout policy applied (5 / 15 / 15) | ✅ Done — verified by Event 4740 |
 | Confirmed no successful logon | ✅ Done |
-| Test account to be disabled after exercise | ⏳ Planned |
+| Test account disabled after exercise | ✅ Done — `Disable-LocalUser Anissa` |
 
 ### Recommendations (for a production environment)
 
