@@ -1,8 +1,8 @@
-# Setup Guide — Phase 1 & 2: Environment Assessment and Endpoint Logging
+# Setup Guide — Environment, Endpoint Logging & Cloud SIEM
 
-> **Scope:** This guide documents how the Windows endpoint in this lab was assessed and instrumented for security monitoring. Every step below was executed and validated on the lab machine. Nothing here is simulated or assumed.
+> **Scope:** This guide documents how the Windows endpoint in this lab was assessed and instrumented for security monitoring, and how a Wazuh SIEM was deployed on a hardened cloud server. Every step below was executed and validated on the lab machine. Nothing here is simulated or assumed.
 >
-> **Status:** ✅ Endpoint logging complete · ⏳ Cloud SIEM (Wazuh) pending
+> **Status:** ✅ Endpoint logging complete · ✅ Cloud SIEM (Wazuh) deployed and connected
 
 ---
 
@@ -34,8 +34,8 @@ Before choosing an architecture, available memory was measured with `Get-Counter
 | Component | Location | Role |
 |---|---|---|
 | Sysmon + Windows audit policy + PowerShell logging | Host (this guide) | Monitored endpoint |
-| Wazuh (manager, indexer, dashboard) | Cloud VM — *planned* | SIEM |
-| Wireshark | Host — *planned* | Network analysis |
+| Wazuh (manager, indexer, dashboard) | Hetzner cloud server (Ubuntu 24.04, 8 GB) | SIEM — see Section 9 |
+| Wireshark | Host | Network analysis |
 
 Security controls were **not** disabled to make room for the lab: Memory Integrity (VBS) and Microsoft Defender remain enabled.
 
@@ -228,7 +228,80 @@ Remove-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\
 
 ---
 
+## 9. Cloud SIEM — Wazuh on a Hardened Server
+
+The full Wazuh SIEM runs on a small cloud server rather than the laptop, so the 8 GB host is never burdened with it. The endpoint connects as an agent and forwards its logs over TLS.
+
+### 9.1 Provision the server
+- **Provider:** Hetzner Cloud, server type CPX31 (4 vCPU / 8 GB / 160 GB), Ubuntu 24.04 LTS.
+- Billed hourly (~$0.12/h), so the lab can run for a session and the server deleted or snapshotted afterward.
+- SSH key authentication only (ed25519 key generated with `ssh-keygen`; public key added at creation, no password login).
+
+### 9.2 Harden before installing anything
+Restrict every inbound port to the analyst's single home IP. Nothing is exposed to the open internet.
+
+```bash
+apt update && apt upgrade -y
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow from <HOME_IP> to any port 22   proto tcp   # SSH
+ufw allow from <HOME_IP> to any port 443  proto tcp   # Wazuh dashboard
+ufw allow from <HOME_IP> to any port 1514 proto tcp   # agent events
+ufw allow from <HOME_IP> to any port 1515 proto tcp   # agent enrollment
+ufw --force enable
+ufw status verbose
+```
+
+> Residential IPs can change; if the dashboard stops loading, update these rules with the new IP.
+
+### 9.3 Install Wazuh (all-in-one)
+```bash
+curl -sO https://packages.wazuh.com/4.14/wazuh-install.sh && bash ./wazuh-install.sh -a
+```
+Takes ~5–10 minutes. The final summary prints the dashboard URL and the generated `admin` password. Access the dashboard at `https://<SERVER_IP>` (self-signed certificate — expected in a lab; proceed past the browser warning).
+
+### 9.4 Connect the Windows endpoint as an agent
+From the dashboard, **Deploy new agent** generates an install command. Run it in an **elevated** PowerShell (the MSI requires true administrator rights — a non-elevated run fails with *Error 1925*):
+
+```powershell
+$msi = "$env:tmp\wazuh-agent.msi"
+Invoke-WebRequest -Uri https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.9-1.msi -OutFile $msi
+Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn WAZUH_MANAGER=<SERVER_IP> WAZUH_AGENT_NAME=windows-endpoint" -Wait
+Start-Service WazuhSvc
+```
+
+Add the Sysmon channel so Wazuh receives it (the Security channel is forwarded by default):
+```powershell
+$conf = "C:\Program Files (x86)\ossec-agent\ossec.conf"
+Copy-Item $conf "$conf.bak"
+$block = @"
+  <localfile>
+    <location>Microsoft-Windows-Sysmon/Operational</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+"@
+(Get-Content $conf -Raw) -replace '</ossec_config>', "$block`r`n</ossec_config>" | Set-Content $conf -Encoding utf8
+Restart-Service WazuhSvc
+```
+
+### 9.5 Validation
+| Test | Result |
+|---|---|
+| Agent log shows connection | ✅ `Connected to the server ([<SERVER_IP>]:1514/tcp)` and `Agent is now online` |
+| Dashboard agent status | ✅ `windows-endpoint` — **Active** |
+| Brute force replayed → alerts | ✅ 8 authentication failures, 0 successes; rule 60204 "Multiple Windows Logon Failures" (level 10); mapped to MITRE ATT&CK T1110 (Brute Force) |
+
+📸 Evidence: `screenshots/07`–`10` (dashboard, active agent, MITRE detection, server).
+
+### 9.6 Cost note
+The server bills for as long as it exists, even when powered off — only **deleting** it (or taking a cheap snapshot and deleting) stops charges. The agent can be removed from the endpoint with:
+```powershell
+Stop-Service WazuhSvc; msiexec.exe /x $env:tmp\wazuh-agent.msi /qn
+```
+
+---
+
 ## Next Steps
 
-- **Phase 3:** Create a dedicated local test account and generate controlled security events (failed logins, account lockout, discovery commands).
-- **Cloud SIEM:** Deploy Wazuh on a cloud VM and forward Security and Sysmon events from this endpoint.
+- Reproduce the brute force with a **real external source IP** between two cloud hosts.
+- Add custom Wazuh rules/decoders and a File Integrity Monitoring scenario.
