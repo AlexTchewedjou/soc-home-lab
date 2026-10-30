@@ -19,6 +19,7 @@ A hands-on Security Operations Center (SOC) home lab that monitors a Windows end
 - [Limitations](#limitations)
 - [Lessons Learned](#lessons-learned)
 - [Cloud SIEM (Wazuh)](#cloud-siem-wazuh)
+- [Live Honeypot — Real Threat Intelligence](#live-honeypot--real-threat-intelligence)
 - [Credits & License](#credits--license)
 
 ---
@@ -34,6 +35,8 @@ This project simulates a mini SOC workflow end to end:
 
 A key theme is **honesty about scope**: the default Hayabusa rule set did *not* flag the brute force, so I identified that detection gap and wrote a custom correlation rule to fill it. Wazuh, by contrast, correlated the same burst natively (rule 60204) — a concrete comparison of two SIEM approaches.
 
+The project then goes a step further than most home labs: a **live Cowrie honeypot** (see below) replaces the simulated attack with **real** internet attackers, capturing genuine malware and threat intel.
+
 ---
 
 ## Objectives
@@ -48,6 +51,7 @@ A key theme is **honesty about scope**: the default Hayabusa rule set did *not* 
 - [x] Incident response documentation and remediation recommendations
 - [x] Professional GitHub documentation
 - [x] Centralized SIEM dashboard (Wazuh) on a hardened cloud server, with the endpoint forwarding live logs
+- [x] Live honeypot capturing real internet attacks + malware, with custom detection rules and threat-intel analysis
 
 ---
 
@@ -100,7 +104,8 @@ The lab was designed around a real constraint: **8 GB of RAM**, with only ~2 GB 
 | **Custom PowerShell + Sigma rule** | Brute-force correlation | Authored here |
 | **Wireshark / tshark** | Network packet analysis | Free / OSS |
 | **Wazuh 4.14** (manager + indexer + dashboard) | Live SIEM — real-time alerts, MITRE ATT&CK mapping | Free / OSS |
-| **Hetzner Cloud (Ubuntu 24.04)** | Hardened host for the Wazuh server | ~$0.12/hr |
+| **Cowrie** (SSH/Telnet honeypot) | Captures real internet attackers + malware | Free / OSS |
+| **Hetzner Cloud (Ubuntu 24.04)** | Hardened hosts for the SIEM and honeypot | ~$0.12/hr each |
 
 ---
 
@@ -165,6 +170,8 @@ Screenshots (with hostnames/usernames redacted) are in [`screenshots/`](screensh
 | `09-wazuh-bruteforce-mitre.png` | Wazuh brute-force detection + MITRE ATT&CK mapping |
 | `09b-wazuh-bruteforce-events.png` | Individual Wazuh alerts (rule 60204 / 60122) |
 | `10-hetzner-server.png` | The hardened Hetzner cloud server running Wazuh |
+| `11-wazuh-cowrie-overview.png` | Honeypot: ~12,800 real-attack alerts + MITRE breakdown |
+| `12-wazuh-cowrie-events.png` | Honeypot: individual alerts from real attackers |
 
 > Raw event logs (`.evtx`) are **not committed** — they contain full system activity. Only filtered, redacted evidence is published.
 
@@ -180,11 +187,14 @@ soc-home-lab/
 ├── configs/
 │   └── sysmonconfig.xml              # Sysmon config (SwiftOnSecurity baseline)
 ├── docs/
-│   ├── setup-guide.md                # Phase 1–2: environment + endpoint logging
-│   └── detection-methodology.md      # How detection works across 3 layers
+│   ├── setup-guide.md                # Environment, endpoint logging + Wazuh deployment
+│   ├── detection-methodology.md      # How detection works across the layers
+│   ├── honeypot-analysis.md          # Live honeypot threat-intel report
+│   └── wazuh-threat-hunting-report.pdf   # Auto-generated SIEM report (real attacks)
 ├── detection-rules/
 │   ├── bruteforce_failed_logon_4625.yml   # Ideal Sigma rule (count aggregation)
-│   └── failed_logon_4625.yml              # Hayabusa-compatible rule
+│   ├── failed_logon_4625.yml              # Hayabusa-compatible rule
+│   └── cowrie_rules.xml                    # Custom Wazuh rules for the honeypot
 ├── scripts/
 │   └── Detect-BruteForce.ps1         # Correlation script (the real detection)
 ├── incident-reports/
@@ -230,6 +240,7 @@ These constraints were turned into design decisions and documented, rather than 
 - **Detective + preventive controls work together.** Logging made the attack visible; the lockout policy stopped it.
 - **Constraints force good engineering.** Working within 8 GB of RAM produced a leaner, better-understood lab than a copy-paste multi-VM build would have — the SIEM moved to a small, firewalled cloud server instead.
 - **The same attack looks different in different tools.** Hayabusa needed a custom rule to flag the brute force; Wazuh correlated it out of the box. Comparing them is more valuable than running just one.
+- **Real attack data beats simulation.** The honeypot replaced a localhost simulation with 104 real attackers and a live malware sample in under a day — genuine source IPs, credential dictionaries, and IOCs, exactly what a SOC analyst triages.
 
 ---
 
@@ -241,11 +252,30 @@ A full Wazuh SIEM was deployed on a hardened Hetzner cloud server (Ubuntu 24.04,
 - **Result:** the controlled brute force appeared in Wazuh in real time — 8 authentication failures, automatically mapped to MITRE ATT&CK Brute Force (T1110) and correlated by built-in rule 60204.
 - See `screenshots/07`–`10` for the dashboard, the active agent, the MITRE mapping, and the server.
 
+---
+
+## Live Honeypot — Real Threat Intelligence
+
+To move from *simulated* attacks to **real** ones, I deployed a Cowrie SSH/Telnet honeypot on a separate hardened cloud server and connected it to the same Wazuh SIEM. Within minutes it was under attack; within ~18 hours it had captured a full dataset of genuine, unsolicited attacks from the internet.
+
+**Headline results (first ~18 hours):**
+- **104 unique attacker IPs**; a Netherlands botnet pair hit it ~1,200 times each.
+- ~3,300 login attempts using classic weak-credential dictionaries (`root:null`, `admin:admin`, and even `claude`/`codex` usernames).
+- A clear automated kill chain: recon (`uname`) → upload hidden payload `/root/.16` → `sudo -S` privilege escalation with guessed passwords → execute.
+- **A real malware sample captured:** a UPX-packed, statically-linked x86-64 ELF **cryptominer** (SHA-256 `a151d3f4…`) that even installs fail2ban to lock out *rival* attackers.
+- Attackers also tried to use the box as an **open proxy** (tunnelling to `google.com:443`) and ran **honeypot-detection probes**.
+
+Custom Wazuh rules ([`detection-rules/cowrie_rules.xml`](detection-rules/cowrie_rules.xml)) turned the Cowrie JSON into ~12,800 severity-rated, MITRE-mapped alerts.
+
+**Full analysis** (attackers, credentials, kill chain, malware analysis, IOCs): [`docs/honeypot-analysis.md`](docs/honeypot-analysis.md)
+**Auto-generated SIEM report:** [`docs/wazuh-threat-hunting-report.pdf`](docs/wazuh-threat-hunting-report.pdf)
+Evidence: `screenshots/11-wazuh-cowrie-overview.png`, `screenshots/12-wazuh-cowrie-events.png`
+
 ### Roadmap (v3)
 
 - [ ] Reproduce the brute force with a **real external source IP** between two cloud hosts.
-- [ ] Capture that network-based attack in Wireshark and correlate it with the Wazuh alert.
-- [ ] Add custom Wazuh rules/decoders and a File Integrity Monitoring scenario.
+- [ ] Capture a network-based attack in Wireshark and correlate it with the Wazuh alert.
+- [ ] Submit the captured malware hash to VirusTotal and add a File Integrity Monitoring scenario.
 
 ---
 
@@ -255,5 +285,6 @@ A full Wazuh SIEM was deployed on a hardened Hetzner cloud server (Ubuntu 24.04,
 - Detection engine: [Hayabusa by Yamato Security](https://github.com/Yamato-Security/hayabusa)
 - Sigma detection format: [SigmaHQ](https://github.com/SigmaHQ/sigma)
 - SIEM platform: [Wazuh](https://github.com/wazuh/wazuh)
+- Honeypot: [Cowrie](https://github.com/cowrie/cowrie)
 
 Licensed under the [MIT License](LICENSE). This is a personal learning portfolio project, not professional work experience.
