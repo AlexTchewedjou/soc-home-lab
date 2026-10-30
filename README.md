@@ -1,129 +1,210 @@
 # SOC Home Lab — Security Monitoring & Incident Detection
 
-A hands-on Security Operations Center (SOC) home lab that monitors a Windows endpoint, generates a controlled attack, and detects and investigates it across three layers: host event logs, a SIEM-style log scanner, and network traffic analysis. Built on a resource-constrained laptop (8 GB RAM) using free and open-source tools.
+This project documents the development of a small Security Operations Center (SOC) home lab built on a Windows 11 laptop with 8 GB of RAM. It uses a combination of open-source security tools and cloud infrastructure to monitor endpoint activity, investigate suspicious events, and test detection capabilities.
 
-> **Ethics & scope:** Every action in this lab was performed on a system I own, against a dedicated test account created for the purpose. No production systems, real credentials, or third-party networks were involved. Simulated activity is clearly labeled as such throughout.
+The lab covers several areas of security operations, including:
+
+- Windows endpoint monitoring and event collection.
+- Security event analysis using Hayabusa and Sigma rules.
+- Custom detection logic using PowerShell.
+- Network traffic investigation with Wireshark.
+- Centralized monitoring and alerting with Wazuh.
+- Incident investigation, documentation, and remediation.
+- Threat intelligence collection using a Cowrie SSH/Telnet honeypot.
+
+The initial phase focused on a controlled brute-force scenario against a dedicated Windows test account. I configured endpoint logging, generated authentication failures, and investigated the resulting events using different detection tools.
+
+I later extended the environment with a Cowrie honeypot connected to Wazuh. This allowed me to collect unsolicited connections from the internet, examine attacker commands, and capture a malware sample for static analysis.
+
+> **Ethics and scope:** All controlled testing was performed on infrastructure I own, using a dedicated test account. The honeypot was deliberately exposed to receive unsolicited connections. No third-party systems were targeted. Captured malware was handled without execution.
 
 ---
 
 ## Table of Contents
+
 - [Overview](#overview)
 - [Objectives](#objectives)
 - [Architecture](#architecture)
-- [Tools](#tools)
+- [Tools and Technologies](#tools-and-technologies)
 - [Detection Scenario: Brute-Force Attack](#detection-scenario-brute-force-attack)
-- [Investigation Methodology](#investigation-methodology)
-- [Evidence](#evidence)
+- [Detection and Investigation Methodology](#detection-and-investigation-methodology)
+- [Evidence and Screenshots](#evidence-and-screenshots)
 - [Repository Structure](#repository-structure)
-- [Setup](#setup)
+- [Setup and Reproduction](#setup-and-reproduction)
 - [Limitations](#limitations)
 - [Lessons Learned](#lessons-learned)
-- [Cloud SIEM (Wazuh)](#cloud-siem-wazuh)
-- [Live Honeypot — Real Threat Intelligence](#live-honeypot--real-threat-intelligence)
-- [Credits & License](#credits--license)
+- [Cloud SIEM Deployment — Wazuh](#cloud-siem-deployment--wazuh)
+- [Live Honeypot — Threat Intelligence](#live-honeypot--threat-intelligence)
+- [Future Improvements](#future-improvements)
+- [Credits and License](#credits-and-license)
 
 ---
 
 ## Overview
 
-This project simulates a mini SOC workflow end to end:
+The project was developed in several stages, starting with endpoint monitoring and progressing to centralized detection and threat intelligence collection.
 
-1. Instrument a Windows 11 endpoint with Sysmon, an advanced audit policy, and PowerShell logging.
-2. Generate a **controlled brute-force attack** against a dedicated test account.
-3. Detect it four ways: **Hayabusa** (Sigma rules), a **custom detection rule**, **Wireshark**, and a **Wazuh SIEM** running on a hardened cloud server.
-4. Investigate, triage, and document the incident as a SOC analyst would.
+The initial workflow involved:
 
-A key theme is **honesty about scope**: the default Hayabusa rule set did *not* flag the brute force, so I identified that detection gap and wrote a custom correlation rule to fill it. Wazuh, by contrast, correlated the same burst natively (rule 60204) — a concrete comparison of two SIEM approaches.
+1. Configuring a Windows 11 endpoint with Sysmon, Windows Advanced Audit Policy, and PowerShell Script Block Logging.
+2. Creating a dedicated test account and generating controlled authentication failures.
+3. Collecting and analyzing Windows Security and Sysmon events.
+4. Using Hayabusa, custom PowerShell detection logic, Wireshark, and Wazuh to investigate the activity.
+5. Documenting the findings in an incident report, including the timeline, evidence, impact assessment, and remediation.
 
-The project then goes a step further than most home labs: a **live Cowrie honeypot** (see below) replaces the simulated attack with **real** internet attackers, capturing genuine malware and threat intel.
+The project was subsequently extended with a Cowrie honeypot to collect activity from external internet sources.
+
+One finding from the initial investigation was that Hayabusa's default detection rules did not generate a consolidated brute-force alert for the tested sequence of failed logons. I developed a PowerShell script to perform the required correlation. During a separate replay, Wazuh identified the authentication burst using its built-in rule 60204.
+
+The honeypot phase provided another perspective by collecting unsolicited authentication attempts, commands, file uploads, and a malware sample from external sources.
 
 ---
 
 ## Objectives
 
-- [x] Endpoint security monitoring (Sysmon + Windows Event Logs)
-- [x] Windows event log collection and analysis
-- [x] Basic SIEM concepts and alert triage (Hayabusa)
-- [x] Detection of repeated failed logins and suspicious activity
-- [x] Custom detection rule development
-- [x] Network traffic analysis (Wireshark)
-- [x] Incident investigation and timeline creation
-- [x] Incident response documentation and remediation recommendations
-- [x] Professional GitHub documentation
-- [x] Centralized SIEM dashboard (Wazuh) on a hardened cloud server, with the endpoint forwarding live logs
-- [x] Live honeypot capturing real internet attacks + malware, with custom detection rules and threat-intel analysis
+The main objectives of this lab were to:
+
+- Configure endpoint security monitoring using Sysmon and Windows Event Logs.
+- Enable Windows authentication and process-creation auditing.
+- Collect PowerShell execution telemetry.
+- Analyze exported Windows event logs using Hayabusa and Sigma rules.
+- Develop custom detection logic for repeated failed authentication attempts.
+- Examine network connection patterns using Wireshark.
+- Deploy a centralized Wazuh SIEM on cloud infrastructure.
+- Forward Windows endpoint events to the SIEM over TLS.
+- Investigate and document a simulated security incident.
+- Deploy a Cowrie honeypot to collect unsolicited internet activity.
+- Perform preliminary static analysis of a captured malware sample.
+- Develop custom Wazuh detection rules for Cowrie events.
 
 ---
 
 ## Architecture
 
-The lab was designed around a real constraint: **8 GB of RAM**, with only ~2 GB free after cleanup. A traditional multi-VM lab (Kali attacker + Windows victim + Linux SIEM) could not run locally. The architecture was adapted to a **host-based endpoint + cloud SIEM** design that delivers the same outcomes without overloading the laptop.
+The lab was designed around a hardware limitation: the laptop has 8 GB of RAM, with approximately 2 GB available after initial system optimization.
 
-```
-   +--------------------------------------------------+
-   |          Windows 11 Host (monitored endpoint)    |
-   |                                                  |
-   |   +------------+   +----------------+            |
-   |   |  Sysmon    |   | Audit Policy   |            |
-   |   | (native)   |   | 4625/4740/4688 |            |
-   |   +-----+------+   +-------+--------+            |
-   |         |                  |                     |
-   |         v                  v                     |
-   |     +---------------------------+                |
-   |     |   Windows Event Logs      |                |
-   |     +------------+--------------+                |
-   |                  |                               |
-   |      +-----+-----+-----+-------------+           |
-   |      |     |     |     |             |           |
-   |      v     v     v     |   Wazuh agent (TLS)     |
-   |  Hayabusa Custom Wire- |        |                |
-   |  (Sigma)  rule   shark |        |                |
-   +------------------------|--------|-----------------+
-                            |        | ports 1514/1515
-                            |        v   (firewalled to home IP)
-                            |   +-----------------------------+
-                            |   |   Hetzner cloud server      |
-                            |   |   Ubuntu 24.04, 8 GB        |
-                            |   |   Wazuh manager + indexer   |
-                            |   |   + dashboard (HTTPS 443)   |
-                            |   +-----------------------------+
+Running multiple virtual machines locally would have placed unnecessary pressure on the host. Instead, I used a host-based monitoring architecture and moved the SIEM components to a cloud server.
+
+### Main detection architecture
+
+```text
+       +--------------------------------------------+
+       |       Windows 11 Host — Endpoint           |
+       |                                            |
+       |  +------------+   +--------------------+   |
+       |  |  Sysmon    |   |  Windows Audit     |   |
+       |  |            |   |  Policy             |   |
+       |  +-----+------+   +---------+----------+   |
+       |        |                    |              |
+       |        v                    v              |
+       |  +--------------------------------------+  |
+       |  |         Windows Event Logs           |  |
+       |  +------------------+-------------------+  |
+       |                     |                      |
+       |      +--------------+--------------+       |
+       |      |              |              |       |
+       |      v              v              v       |
+       |   Hayabusa       PowerShell     Wireshark  |
+       |   (Sigma)        Detection       / tshark  |
+       |                     |                      |
+       |              Wazuh Agent                   |
+       +---------------------+----------------------+
+                             |
+                             | TLS
+                             | Ports 1514 / 1515
+                             v
+                 +--------------------------+
+                 |    Hetzner Cloud         |
+                 |    Ubuntu 24.04          |
+                 |                          |
+                 |    Wazuh Manager         |
+                 |    Wazuh Indexer         |
+                 |    Wazuh Dashboard       |
+                 +--------------------------+
 ```
 
-**Why this design?** See [`docs/setup-guide.md`](docs/setup-guide.md) for the full RAM assessment and rationale. The local host handles endpoint logging and offline analysis (Hayabusa, Wireshark, the custom rule); a small cloud server runs the full Wazuh SIEM, so the laptop never has to host it. Security controls (Memory Integrity / VBS, Microsoft Defender) were kept **enabled** throughout, and the cloud server's ports are **firewalled to a single home IP** — the dashboard is never exposed to the open internet.
+### Honeypot architecture
+
+A separate cloud server hosts Cowrie and a Wazuh agent. External connections to SSH/Telnet are directed to the simulated environment, while Cowrie events are forwarded to the SIEM.
+
+```text
+       Internet — External Sources
+                   |
+                   | SSH / Telnet
+                   v
+          +----------------------+
+          |  Cowrie Honeypot     |
+          |  Hetzner Cloud       |
+          |  Ubuntu 24.04        |
+          |                      |
+          |  Simulated Shell     |
+          |  Wazuh Agent         |
+          +----------+-----------+
+                     |
+                     | TLS
+                     v
+              +-------------+
+              |  Wazuh SIEM |
+              |             |
+              |  Manager    |
+              |  Indexer    |
+              |  Dashboard  |
+              +-------------+
+```
+
+### Architecture decisions
+
+The Windows endpoint handles event collection and offline analysis. Wazuh runs on a separate cloud server, avoiding the need to host the full SIEM locally.
+
+Memory Integrity (VBS) and Microsoft Defender remained enabled throughout the setup.
+
+The cloud infrastructure was also configured with firewall restrictions. Administrative SSH, dashboard access, and agent communication ports were restricted to the required source IP addresses rather than being exposed indiscriminately to the internet.
+
+For the complete environment assessment and configuration steps, see [`docs/setup-guide.md`](docs/setup-guide.md).
 
 ---
 
-## Tools
+## Tools and Technologies
 
-| Tool | Role | Cost |
-|---|---|---|
-| **Sysmon** (native Windows 11 feature) | Endpoint telemetry (process, DNS, etc.) | Free |
-| **Windows Advanced Audit Policy** | Logon, lockout, process-creation auditing | Built-in |
-| **PowerShell Script Block Logging** | Captures executed PowerShell | Built-in |
-| **Hayabusa** (Yamato Security) | Sigma-based log scanner / timeline | Free / OSS |
-| **Custom PowerShell + Sigma rule** | Brute-force correlation | Authored here |
-| **Wireshark / tshark** | Network packet analysis | Free / OSS |
-| **Wazuh 4.14** (manager + indexer + dashboard) | Live SIEM — real-time alerts, MITRE ATT&CK mapping | Free / OSS |
-| **Cowrie** (SSH/Telnet honeypot) | Captures real internet attackers + malware | Free / OSS |
-| **Hetzner Cloud (Ubuntu 24.04)** | Hardened hosts for the SIEM and honeypot | ~$0.12/hr each |
+| Tool / Technology | Purpose |
+|---|---|
+| Sysmon | Endpoint telemetry, process creation, DNS activity |
+| Windows Advanced Audit Policy | Authentication, account management, and process auditing |
+| PowerShell Script Block Logging | PowerShell execution monitoring |
+| Hayabusa | Offline Windows event log analysis using Sigma rules |
+| Sigma | Detection rule format |
+| Custom PowerShell | Brute-force correlation and event analysis |
+| Wireshark / tshark | Network traffic capture and analysis |
+| Wazuh 4.14 | Centralized SIEM, alerting, and MITRE ATT&CK mapping |
+| Cowrie | SSH/Telnet honeypot |
+| Hetzner Cloud | Hosting for the Wazuh SIEM and honeypot |
+| Ubuntu 24.04 | Cloud server operating system |
+| MITRE ATT&CK | Classification of observed adversary techniques |
+
+**Infrastructure:** Hetzner Cloud servers were used for the SIEM and honeypot deployments. The server configurations differed according to their workloads.
 
 ---
 
 ## Detection Scenario: Brute-Force Attack
 
-A password-guessing attack was simulated against a dedicated local test account, then detected and investigated.
+The first attack scenario involved repeated password attempts against a dedicated local Windows test account.
 
-| Stage | Event ID | Evidence |
+The objective was to generate authentication events, verify the account lockout policy, and determine whether the activity could be identified using the available detection tools.
+
+### Observed activity
+
+| Event | Windows Event ID | Result |
 |---|---|---|
-| Test account created | 4720 | Security log |
-| 6 failed logons in ~5 seconds | 4625 ×6 | Security log |
-| Account locked out | 4740 | Security log |
-| Network connection burst (SSH variant) | — | `ssh-bruteforce.pcapng` |
+| Test account creation | 4720 | Account created |
+| Failed authentication | 4625 | 6 events recorded |
+| Account lockout | 4740 | Lockout triggered |
+| Network connection activity | — | Captured with Wireshark |
 
-**Custom detection output:**
+### Custom detection output
 
-```
+```text
 [!] BRUTE-FORCE DETECTED
+
 TargetUser    : <test account>
 FailedCount   : 6
 FirstAttempt  : 2026-10-27 15:21:12
@@ -132,159 +213,337 @@ AccountLocked : True
 MITRE ATT&CK  : T1110 / T1110.001
 ```
 
-Full write-up: [`incident-reports/sample-incident-report.md`](incident-reports/sample-incident-report.md)
+The custom PowerShell script identified six failed logons against the same account within the configured five-minute window.
+
+The Windows account lockout policy was triggered, and no successful authentication was identified during the investigation.
+
+A separate replay through Wazuh recorded eight authentication failures and zero successful logons.
+
+**Full incident report:** [`incident-reports/sample-incident-report.md`](incident-reports/sample-incident-report.md)
 
 ---
 
-## Investigation Methodology
+## Detection and Investigation Methodology
 
-Detection used four complementary layers, each reinforcing the others:
+The investigation used multiple sources of telemetry to examine authentication activity, endpoint events, and network connections.
 
-1. **Host logs** show *who* and *what* (failed logons, the lockout).
-2. **Hayabusa** reduced ~36,000 raw events to 7 prioritized detections (>99% data reduction), which were then triaged.
-3. **A custom rule** correlated the failed-logon burst that off-the-shelf Hayabusa rules missed.
-4. **Wireshark** showed the attack pattern on the wire (a burst of short-lived connections).
-5. **Wazuh** ingested the same events live and raised them in real time — 8 authentication failures, 0 successes, automatically mapped to **MITRE ATT&CK: Brute Force (T1110)**, and correlated into a single alert by its built-in rule **60204 "Multiple Windows Logon Failures"**.
+### 1. Host-Based Monitoring
 
-A useful comparison emerged: Hayabusa's default Sigma rules **could not** correlate the failed-logon burst (which is why I wrote a custom rule), whereas **Wazuh did it natively**. Seeing where each tool succeeds and fails is a core SOC skill.
+Sysmon and Windows Advanced Audit Policy were configured to collect relevant endpoint activity.
 
-Triage was done honestly: of 7 raw Hayabusa detections, 5 were **benign true positives** (my own authorized setup) and 2 were **false positives** (a rule matched a legitimate `net accounts` command). Every verdict was verified against the underlying command line.
+The main event sources included:
 
-Full methodology: [`docs/detection-methodology.md`](docs/detection-methodology.md)
+- Event ID 4625 — Failed logon.
+- Event ID 4740 — Account lockout.
+- Event ID 4720 — User account creation.
+- Event ID 4688 — Process creation.
+- Event ID 4104 — PowerShell Script Block Logging.
+- Sysmon Event ID 1 — Process creation.
+- Sysmon Event ID 22 — DNS query.
+
+### 2. Offline Log Analysis — Hayabusa
+
+Hayabusa was used to analyze exported Windows event logs against Sigma-based detection rules.
+
+Approximately 36,000 raw events were processed, producing seven prioritized findings for manual review.
+
+The investigation identified events associated with:
+
+- Account and audit-policy configuration.
+- System discovery.
+- Administrative password changes.
+- Potential Active Directory enumeration.
+
+The findings were reviewed against the underlying event data before being classified as benign true positives or false positives.
+
+### 3. Custom Detection Development
+
+The default Hayabusa rules did not generate a consolidated alert for the tested sequence of repeated failed logons.
+
+To address this, I developed a PowerShell script that:
+
+- Groups Event ID 4625 records by target account.
+- Evaluates the number of failures within a sliding time window.
+- Generates an alert when the configured threshold is reached.
+- Checks for a corresponding Event ID 4740 account lockout.
+
+The detection threshold was five failed logons against the same account within five minutes.
+
+### 4. Network Analysis — Wireshark
+
+Wireshark and tshark were used to examine the network activity associated with a controlled SSH brute-force exercise.
+
+The capture showed repeated TCP connections to port 22 from the local source address.
+
+Because SSH encrypts authentication traffic, the capture provided connection metadata rather than the passwords entered during the attempts.
+
+### 5. Live SIEM Monitoring — Wazuh
+
+The Windows endpoint was connected to Wazuh through its agent.
+
+During a separate replay of the brute-force scenario, Wazuh generated eight authentication-failure events and correlated them using built-in rule 60204, *Multiple Windows Logon Failures*.
+
+The alert was automatically mapped to MITRE ATT&CK T1110 — Brute Force.
+
+### Comparison
+
+The testing highlighted a difference between the tools:
+
+- Hayabusa was useful for offline event analysis and forensic timelines, but additional correlation logic was needed for the tested brute-force sequence.
+- The custom PowerShell script performed the required threshold-based correlation.
+- Wazuh generated a consolidated alert through its built-in correlation rule during the separate replay.
+
+This comparison helped identify where additional detection logic was necessary and how centralized monitoring could support the investigation.
+
+**Full methodology:** [`docs/detection-methodology.md`](docs/detection-methodology.md)
 
 ---
 
-## Evidence
+## Evidence and Screenshots
 
-Screenshots (with hostnames/usernames redacted) are in [`screenshots/`](screenshots/):
+The repository includes screenshots documenting the configuration, detection process, and investigation results.
 
-| File | Shows |
+| Screenshot | Description |
 |---|---|
-| `01-sysmon-event-id-1.png` | Sysmon process-creation logging working |
-| `02-event-4625-failed-logon.png` | A failed logon (4625) during the attack |
+| `01-sysmon-event-id-1.png` | Sysmon process-creation logging |
+| `02-event-4625-failed-logon.png` | Windows failed authentication event |
 | `04b-hayabusa-security-summary.png` | Hayabusa detection summary |
-| `05-bruteforce-detection.png` | Custom rule firing on the attack |
-| `06-wireshark-ssh-bruteforce.png` | Network connection burst to port 22 |
-| `07-wazuh-dashboard-overview.png` | Wazuh SIEM dashboard overview |
-| `08-wazuh-agent-active.png` | Windows endpoint connected to Wazuh (agent active) |
-| `09-wazuh-bruteforce-mitre.png` | Wazuh brute-force detection + MITRE ATT&CK mapping |
-| `09b-wazuh-bruteforce-events.png` | Individual Wazuh alerts (rule 60204 / 60122) |
-| `10-hetzner-server.png` | The hardened Hetzner cloud server running Wazuh |
-| `11-wazuh-cowrie-overview.png` | Honeypot: ~12,800 real-attack alerts + MITRE breakdown |
-| `12-wazuh-cowrie-events.png` | Honeypot: individual alerts from real attackers |
+| `05-bruteforce-detection.png` | Custom PowerShell detection output |
+| `06-wireshark-ssh-bruteforce.png` | SSH connection activity in Wireshark |
+| `07-wazuh-dashboard-overview.png` | Wazuh SIEM dashboard |
+| `08-wazuh-agent-active.png` | Windows endpoint connected to Wazuh |
+| `09-wazuh-bruteforce-mitre.png` | Wazuh brute-force alert and MITRE mapping |
+| `09b-wazuh-bruteforce-events.png` | Individual Wazuh authentication alerts |
+| `10-hetzner-server.png` | Cloud server running Wazuh |
+| `11-wazuh-cowrie-overview.png` | Cowrie events and MITRE breakdown |
+| `12-wazuh-cowrie-events.png` | Individual honeypot alerts |
 
-> Raw event logs (`.evtx`) are **not committed** — they contain full system activity. Only filtered, redacted evidence is published.
+Browse the complete collection in [`screenshots/`](screenshots/).
+
+> Raw Windows event logs (`.evtx`) and policy backups are not published because they may contain personal information and full system activity. Only reviewed and appropriately redacted evidence is included.
 
 ---
 
 ## Repository Structure
 
-```
+```text
 soc-home-lab/
+│
 ├── README.md
 ├── LICENSE
 ├── .gitignore
+│
 ├── configs/
-│   └── sysmonconfig.xml              # Sysmon config (SwiftOnSecurity baseline)
+│   └── sysmonconfig.xml
+│
 ├── docs/
-│   ├── setup-guide.md                # Environment, endpoint logging + Wazuh deployment
-│   ├── detection-methodology.md      # How detection works across the layers
-│   ├── honeypot-analysis.md          # Live honeypot threat-intel report
-│   └── wazuh-threat-hunting-report.pdf   # Auto-generated SIEM report (real attacks)
+│   ├── setup-guide.md
+│   ├── detection-methodology.md
+│   ├── honeypot-analysis.md
+│   └── wazuh-threat-hunting-report.pdf
+│
 ├── detection-rules/
-│   ├── bruteforce_failed_logon_4625.yml   # Ideal Sigma rule (count aggregation)
-│   ├── failed_logon_4625.yml              # Hayabusa-compatible rule
-│   └── cowrie_rules.xml                    # Custom Wazuh rules for the honeypot
+│   ├── bruteforce_failed_logon_4625.yml
+│   ├── failed_logon_4625.yml
+│   └── cowrie_rules.xml
+│
 ├── scripts/
-│   └── Detect-BruteForce.ps1         # Correlation script (the real detection)
+│   └── Detect-BruteForce.ps1
+│
 ├── incident-reports/
-│   └── sample-incident-report.md     # IR-2026-001
+│   └── sample-incident-report.md
+│
 ├── screenshots/
+│   ├── 01-sysmon-event-id-1.png
+│   ├── 02-event-4625-failed-logon.png
+│   └── ...
+│
 └── logs/
-    └── README.md                     # Why raw logs are not published
+    └── README.md
 ```
+
+The `evidence/` directory is maintained locally and excluded from the public repository.
 
 ---
 
-## Setup
+## Setup and Reproduction
 
-Reproduce the endpoint instrumentation with [`docs/setup-guide.md`](docs/setup-guide.md). In brief:
+The endpoint configuration and Wazuh deployment are documented in [`docs/setup-guide.md`](docs/setup-guide.md).
 
-1. Enable native Sysmon and apply the config in `configs/`.
-2. Apply the advanced audit policy (commands in the setup guide).
-3. Enable PowerShell Script Block Logging.
-4. Generate the controlled attack and export the logs.
-5. Scan with Hayabusa and run `scripts/Detect-BruteForce.ps1`.
+The main setup process is:
 
-Every step in the guide was executed and validated on the lab machine.
+1. Assess available system resources.
+2. Enable Sysmon and apply the configuration in `configs/`.
+3. Configure Windows Advanced Audit Policy.
+4. Enable PowerShell Script Block Logging.
+5. Increase relevant Windows event log retention sizes.
+6. Deploy the Wazuh SIEM on the cloud server.
+7. Install and connect the Wazuh agent on the Windows endpoint.
+8. Generate the controlled authentication scenario.
+9. Export and analyze the Windows event logs.
+10. Run the custom PowerShell detection script.
+
+The guide includes the commands, configuration files, validation checks, and rollback procedures used during implementation.
 
 ---
 
 ## Limitations
 
-This project is honest about what it is and isn't:
+The lab was developed with specific hardware and testing constraints. These limitations are documented because they affect how the results should be interpreted.
 
-- **The attacker is local (`localhost`), not a separate machine.** The RAM constraint ruled out a dedicated attacker VM. Events show `::1` / `127.0.0.1` as the source. In a real incident this would be an external IP.
-- **SSH traffic is encrypted**, so the Wireshark capture shows the *connection pattern*, not the guessed passwords.
-- **Hayabusa cannot evaluate Sigma `count()` aggregations**, which is exactly why the custom PowerShell correlation script exists (and why Wazuh's native correlation is a useful contrast).
-- **The Wazuh server is a lab deployment.** It uses the installer's self-signed certificate, and its exposure is limited by a host-IP firewall rather than a full production hardening baseline.
+**Local attack generation**
 
-These constraints were turned into design decisions and documented, rather than hidden.
+The original brute-force scenario was generated locally rather than from a separate attacker virtual machine. The source address was therefore `::1` or `127.0.0.1`, depending on the test.
+
+**Encrypted SSH traffic**
+
+Wireshark captured the TCP connection pattern but could not reveal the passwords entered through SSH.
+
+**Offline correlation**
+
+Hayabusa's default rules did not provide the required aggregation for the tested failed-logon sequence. A custom PowerShell script was used for that purpose.
+
+**Cloud SIEM configuration**
+
+Wazuh was deployed for lab use on a cloud server. Its dashboard used a self-signed certificate, and access was restricted through firewall rules to the permitted source IP.
+
+**Honeypot attribution**
+
+The honeypot recorded 104 unique source IP addresses. These represent observed network sources, not 104 confirmed individual attackers. Network ownership and geolocation information do not establish the identity of an operator.
+
+**Malware analysis**
+
+The captured sample was inspected using static analysis tools. Its suspected runtime behavior was not verified through execution.
+
+These limitations define the scope of the testing and identify areas for further development.
 
 ---
 
 ## Lessons Learned
 
-- **Off-the-shelf detection has gaps.** A burst of failed logons needed a custom correlation rule to be flagged. Knowing *what the tools miss* is as important as running them.
-- **Triage is the real skill.** Most alerts were benign or false positives; verifying command lines separated signal from noise.
-- **Detective + preventive controls work together.** Logging made the attack visible; the lockout policy stopped it.
-- **Constraints force good engineering.** Working within 8 GB of RAM produced a leaner, better-understood lab than a copy-paste multi-VM build would have — the SIEM moved to a small, firewalled cloud server instead.
-- **The same attack looks different in different tools.** Hayabusa needed a custom rule to flag the brute force; Wazuh correlated it out of the box. Comparing them is more valuable than running just one.
-- **Real attack data beats simulation.** The honeypot replaced a localhost simulation with 104 real attackers and a live malware sample in under a day — genuine source IPs, credential dictionaries, and IOCs, exactly what a SOC analyst triages.
+Working through the different stages of this lab provided several practical observations.
+
+- **Detection coverage needs to be tested.** The default Hayabusa rules did not generate the required brute-force correlation, so additional detection logic was necessary.
+- **Alert investigation requires context.** Reviewing the original event records and command lines helped distinguish legitimate administrative activity from suspicious behavior.
+- **Preventive and detective controls serve different purposes.** Windows logging provided visibility into the authentication attempts, while the account lockout policy stopped further password guessing.
+- **Resource constraints influence architecture.** Moving Wazuh to a cloud server allowed the laptop to remain dedicated to endpoint monitoring and offline analysis.
+- **Different tools provide different perspectives.** Hayabusa, PowerShell, Wireshark, and Wazuh each contributed different information during the investigation.
+- **External telemetry provides additional investigative opportunities.** The Cowrie deployment collected activity that could not be reproduced through the original localhost scenario, including external source IPs, credential attempts, command sequences, and a malware sample.
 
 ---
 
-## Cloud SIEM (Wazuh)
+## Cloud SIEM Deployment — Wazuh
 
-A full Wazuh SIEM was deployed on a hardened Hetzner cloud server (Ubuntu 24.04, 8 GB), and the Windows endpoint was connected as an agent forwarding Security and Sysmon events over TLS.
+A centralized Wazuh SIEM was deployed on a Hetzner cloud server running Ubuntu 24.04.
 
-- **Hardening:** UFW firewall denies all inbound by default; SSH (22), dashboard (443), and agent ports (1514/1515) are each restricted to a single home IP. Key-only SSH, no password login. The dashboard is never exposed to the open internet.
-- **Result:** the controlled brute force appeared in Wazuh in real time — 8 authentication failures, automatically mapped to MITRE ATT&CK Brute Force (T1110) and correlated by built-in rule 60204.
-- See `screenshots/07`–`10` for the dashboard, the active agent, the MITRE mapping, and the server.
+The deployment included:
+
+- Wazuh Manager.
+- Wazuh Indexer.
+- Wazuh Dashboard.
+- Windows Wazuh Agent.
+
+### Security configuration
+
+The server was configured with:
+
+- UFW firewall using a default-deny inbound policy.
+- SSH access restricted to the permitted home IP.
+- Dashboard access restricted to the permitted home IP.
+- Agent communication ports 1514 and 1515 restricted to the required source address.
+- SSH key authentication instead of password authentication.
+
+The Windows endpoint forwarded Security and Sysmon events to the manager over the configured connection.
+
+### Validation
+
+During the separate brute-force replay, Wazuh recorded:
+
+- 8 authentication failures.
+- 0 successful authentications.
+- Built-in rule 60204 — Multiple Windows Logon Failures.
+- Automatic MITRE ATT&CK mapping to T1110.
+
+The agent connection and alert generation were verified through the Wazuh dashboard.
+
+Supporting evidence is available in `screenshots/07`–`10`.
 
 ---
 
-## Live Honeypot — Real Threat Intelligence
+## Live Honeypot — Threat Intelligence
 
-To move from *simulated* attacks to **real** ones, I deployed a Cowrie SSH/Telnet honeypot on a separate hardened cloud server and connected it to the same Wazuh SIEM. Within minutes it was under attack; within ~18 hours it had captured a full dataset of genuine, unsolicited attacks from the internet.
+After completing the initial detection exercises, I extended the lab with a Cowrie SSH/Telnet honeypot.
 
-**Headline results (first ~18 hours):**
-- **104 unique attacker IPs**; a Netherlands botnet pair hit it ~1,200 times each.
-- ~3,300 login attempts using classic weak-credential dictionaries (`root:null`, `admin:admin`, and even `claude`/`codex` usernames).
-- A clear automated kill chain: recon (`uname`) → upload hidden payload `/root/.16` → `sudo -S` privilege escalation with guessed passwords → execute.
-- **A real malware sample captured:** a UPX-packed, statically-linked x86-64 ELF **cryptominer** (SHA-256 `a151d3f4…`) that even installs fail2ban to lock out *rival* attackers.
-- Attackers also tried to use the box as an **open proxy** (tunnelling to `google.com:443`) and ran **honeypot-detection probes**.
+The objective was to collect unsolicited activity from external sources rather than relying exclusively on locally generated attacks.
 
-Custom Wazuh rules ([`detection-rules/cowrie_rules.xml`](detection-rules/cowrie_rules.xml)) turned the Cowrie JSON into ~12,800 severity-rated, MITRE-mapped alerts.
+Cowrie was deployed on a separate hardened Hetzner cloud server and connected to the Wazuh SIEM through its agent.
 
-**Full analysis** (attackers, credentials, kill chain, malware analysis, IOCs): [`docs/honeypot-analysis.md`](docs/honeypot-analysis.md)
-**Auto-generated SIEM report:** [`docs/wazuh-threat-hunting-report.pdf`](docs/wazuh-threat-hunting-report.pdf)
-Evidence: `screenshots/11-wazuh-cowrie-overview.png`, `screenshots/12-wazuh-cowrie-events.png`
+Within minutes of becoming publicly accessible, the honeypot began receiving automated connections.
 
-### Roadmap (v3)
+### Results — First 18 Hours
 
-- [ ] Reproduce the brute force with a **real external source IP** between two cloud hosts.
-- [ ] Capture a network-based attack in Wireshark and correlate it with the Wazuh alert.
-- [ ] Submit the captured malware hash to VirusTotal and add a File Integrity Monitoring scenario.
+| Metric | Observed value |
+|---|---:|
+| Cowrie events | ~28,000 |
+| Wazuh alerts | ~12,800 |
+| Unique source IPs | 104 |
+| Login attempts | ~3,350 |
+| Commands entered | ~4,250 |
+| Unique malware samples | 1 |
+| Malware upload occurrences | 24 |
+
+### Key observations
+
+- **Repeated connections:** Two IP addresses from the same Netherlands /24 network generated approximately 1,200 connections each.
+- **Credential guessing:** Common usernames and passwords included `root`, `admin`, `123456`, and `password`. The usernames `claude` and `codex` also appeared in the captured authentication attempts.
+- **Command execution:** Several sessions followed a sequence involving system discovery, file uploads, permission changes, and execution attempts.
+- **Malware collection:** Cowrie captured a 3.3 MB UPX-packed, statically linked x86-64 ELF sample classified as a cryptocurrency miner through preliminary static inspection.
+- **Network activity:** Some sessions attempted SSH tunneling to `google.com:443`.
+- **Honeypot detection:** Certain commands appeared designed to examine shell behavior and identify whether the environment was simulated.
+
+### Wazuh integration
+
+Custom Wazuh rules were configured to process Cowrie JSON events and generate severity-rated alerts with MITRE ATT&CK mappings.
+
+Approximately 12,800 alerts were recorded during the first 18 hours.
+
+The captured malware was handled read-only and was never executed.
+
+**Detailed analysis:**
+[`docs/honeypot-analysis.md`](docs/honeypot-analysis.md)
+
+**Generated SIEM report:**
+[`docs/wazuh-threat-hunting-report.pdf`](docs/wazuh-threat-hunting-report.pdf)
+
+**Supporting screenshots:**
+- `screenshots/11-wazuh-cowrie-overview.png`
+- `screenshots/12-wazuh-cowrie-events.png`
 
 ---
 
-## Credits & License
+## Future Improvements
 
-- Sysmon configuration baseline: [SwiftOnSecurity/sysmon-config](https://github.com/SwiftOnSecurity/sysmon-config)
-- Detection engine: [Hayabusa by Yamato Security](https://github.com/Yamato-Security/hayabusa)
-- Sigma detection format: [SigmaHQ](https://github.com/SigmaHQ/sigma)
+The next development stages will focus on extending the existing detection and investigation capabilities.
+
+- Reproduce the brute-force scenario using an external source IP between two controlled cloud hosts.
+- Capture external network attack traffic in Wireshark and correlate it with Wazuh alerts.
+- Develop additional custom Wazuh rules and decoders.
+- Add a File Integrity Monitoring (FIM) scenario.
+- Perform further malware analysis in an isolated environment.
+- Expand detection coverage for additional MITRE ATT&CK techniques.
+
+---
+
+## Credits and License
+
+This project uses several open-source tools and community resources:
+
+- Sysmon configuration: [SwiftOnSecurity/sysmon-config](https://github.com/SwiftOnSecurity/sysmon-config)
+- Windows event log analysis: [Hayabusa — Yamato Security](https://github.com/Yamato-Security/hayabusa)
+- Detection rule format: [SigmaHQ](https://github.com/SigmaHQ/sigma)
 - SIEM platform: [Wazuh](https://github.com/wazuh/wazuh)
-- Honeypot: [Cowrie](https://github.com/cowrie/cowrie)
+- SSH/Telnet honeypot: [Cowrie](https://github.com/cowrie/cowrie)
 
-Licensed under the [MIT License](LICENSE). This is a personal learning portfolio project, not professional work experience.
+Licensed under the [MIT License](LICENSE).
+
+This is a personal cybersecurity learning and portfolio project. It demonstrates practical lab exercises and does not represent professional SOC employment experience.
