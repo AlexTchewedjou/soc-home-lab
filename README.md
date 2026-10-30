@@ -545,5 +545,3 @@ This project uses several open-source tools and community resources:
 - SSH/Telnet honeypot: [Cowrie](https://github.com/cowrie/cowrie)
 
 Licensed under the [MIT License](LICENSE).
-
-This is a personal cybersecurity learning and portfolio project. It demonstrates practical lab exercises and does not represent professional SOC employment experience.
