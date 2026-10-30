@@ -1,133 +1,283 @@
 # Detection Methodology
 
-This document explains how security events were detected and investigated in this lab, across four complementary layers: host event logs, a SIEM-style log scanner, network traffic analysis, and a live Wazuh SIEM.
+## Overview
+
+This document describes the detection and investigation methods used throughout this security lab. The objective was to examine suspicious activity using multiple data sources rather than relying on a single detection tool.
+
+Four complementary approaches were used:
+
+- **Endpoint monitoring:** Sysmon and Windows Advanced Audit Policy.
+- **Offline log analysis:** Hayabusa and custom PowerShell scripts.
+- **Network traffic analysis:** Wireshark and tshark.
+- **Centralized monitoring:** Wazuh SIEM.
+
+Each approach provided a different view of the activity, from Windows authentication events and process execution to network connections and centralized security alerts.
 
 ---
 
-## Detection Philosophy
+## Detection Approach
 
-A single data source is rarely enough. This lab combines three layers so that an attack is visible from more than one angle:
+The investigation used multiple sources of telemetry to identify and validate suspicious activity.
 
-| Layer | Tool | What it sees |
+| Layer | Tool | Data collected |
 |---|---|---|
-| **Endpoint / host** | Sysmon + Windows audit policy | Process creation, logons, account changes |
-| **Offline log analysis** | Hayabusa (Sigma rules) + custom PowerShell | Correlated detections across many events |
-| **Network** | Wireshark / tshark | Connection patterns on the wire |
-| **Live SIEM** | Wazuh (cloud server + endpoint agent) | Real-time alerts, MITRE ATT&CK mapping, native correlation |
+| Endpoint / host | Sysmon + Windows audit policy | Process creation, authentication, account changes |
+| Offline log analysis | Hayabusa + custom PowerShell | Sigma-based detections and event correlation |
+| Network | Wireshark / tshark | TCP connections and traffic patterns |
+| Live SIEM | Wazuh | Centralized event collection, alerting, and MITRE ATT&CK mapping |
+
+The purpose of combining these sources was to compare what each tool could detect and identify situations where additional correlation logic was required.
 
 ---
 
 ## 1. Host-Based Detection
 
-### Data sources enabled
-- **Sysmon** (native Windows 11 feature) with the SwiftOnSecurity configuration — process creation (Event ID 1), DNS queries (22), and more.
-- **Windows advanced audit policy** — logon success/failure (4624/4625), account lockout (4740), account creation (4720), credential validation (4776), process creation with command line (4688).
-- **PowerShell Script Block Logging** (4104).
+### Data collection
 
-### Key Event IDs used in this lab
+Windows endpoint logging was configured to capture authentication activity, process execution, account changes, and PowerShell activity.
 
-| Event ID | Meaning | Role in detection |
+The following sources were enabled:
+
+- **Sysmon:** Configured using the SwiftOnSecurity configuration to collect process creation events (Event ID 1), DNS queries (Event ID 22), and other relevant system activity.
+- **Windows Advanced Audit Policy:** Configured to record successful and failed logons, account management activity, credential validation, and process creation.
+- **PowerShell Script Block Logging:** Enabled to record PowerShell script block execution (Event ID 4104).
+
+### Relevant Windows Event IDs
+
+| Event ID | Description | Detection purpose |
 |---|---|---|
-| 4720 | Account created | Start of the attack timeline |
-| 4625 | Failed logon | Core brute-force indicator |
-| 4740 | Account locked out | Confirms the defensive control fired |
-| 4776 | Credential validation failed | Corroborates failed authentication |
-| 4688 | Process created (with command line) | Detects discovery commands (e.g. whoami) |
+| 4720 | User account created | Identify account creation activity |
+| 4625 | Failed logon | Detect unsuccessful authentication attempts |
+| 4740 | User account locked out | Confirm account lockout activity |
+| 4776 | NTLM credential validation | Investigate credential validation failures |
+| 4688 | Process creation | Identify suspicious process execution and command lines |
+| 4104 | PowerShell script block logging | Review PowerShell activity |
+
+These events provided the underlying telemetry used during subsequent detection and investigation.
 
 ---
 
-## 2. Log Analysis with Hayabusa
+## 2. Offline Log Analysis with Hayabusa
 
-[Hayabusa](https://github.com/Yamato-Security/hayabusa) applies ~4,800 Sigma detection rules to exported `.evtx` files and produces a prioritized CSV timeline with severity levels and MITRE ATT&CK mappings.
+[Hayabusa](https://github.com/Yamato-Security/hayabusa) was used to analyze exported Windows Event Log files (`.evtx`) against Sigma-based detection rules.
 
-### Process
-1. Export the Security and Sysmon logs: `wevtutil epl <channel> <file.evtx>`.
-2. Update rules: `hayabusa update-rules`.
-3. Scan: `hayabusa dfir-timeline -f <file.evtx> -o <timeline.csv> -m medium -w -U`.
+The tool generates a prioritized timeline containing relevant events, severity information, and MITRE ATT&CK mappings.
 
-### Result
-Hayabusa reduced ~36,000 raw events to a handful of prioritized detections (over 99% data reduction). It surfaced configuration changes and discovery activity.
+### Analysis process
 
-### Triage outcome
+1. Export the Windows Security and Sysmon event logs:
 
-| Detection | Verdict | Reasoning |
+   ```powershell
+   wevtutil epl <channel> <file.evtx>
+   ```
+
+2. Update the Hayabusa detection rules:
+
+   ```powershell
+   hayabusa update-rules
+   ```
+
+3. Generate a forensic timeline:
+
+   ```powershell
+   hayabusa dfir-timeline -f <file.evtx> -o <timeline.csv> -m medium -w -U
+   ```
+
+### Results
+
+Approximately 36,000 raw events were processed. Hayabusa generated a smaller set of prioritized findings, allowing the investigation to focus on events that warranted further review.
+
+The analysis identified activity related to account configuration changes and system discovery.
+
+### Detection triage
+
+Each finding was reviewed against the underlying event data before assigning a verdict.
+
+| Detection | Verdict | Investigation findings |
 |---|---|---|
-| Eventlog Clearing / Config Change | Benign true positive | Authorized audit-policy setup |
-| Whoami group reconnaissance | Benign true positive | Lab validation command (T1033) |
-| Password Reset By Admin | Benign true positive | Setting the test account password |
-| AdFind AD Enumeration | False positive | Rule matched `net accounts` keyword; no AdFind or AD present |
+| Event Log Clearing / Configuration Change | Benign true positive | The event was associated with authorized audit-policy configuration. |
+| Whoami Group Reconnaissance | Benign true positive | The command was executed intentionally during lab validation (T1033). |
+| Password Reset by Administrator | Benign true positive | The password change was part of test-account preparation. |
+| AdFind AD Enumeration | False positive | The detection matched a `net accounts` keyword, but no AdFind execution or Active Directory environment was present. |
 
-**Key finding:** every detection was verified against the underlying command line before a verdict was assigned. Alert titles alone are not conclusive.
-
----
-
-## 3. Custom Detection Rule (Detection Gap)
-
-The off-the-shelf Sigma rules did **not** raise a brute-force alert for the burst of failed logons, because they do not correlate multiple 4625 events by account within a time window.
-
-### Rules authored
-- `detection-rules/bruteforce_failed_logon_4625.yml` — the ideal Sigma rule using `count() by TargetUserName >= 5`. Documents the intended logic. Standalone scanners cannot evaluate this aggregation.
-- `detection-rules/failed_logon_4625.yml` — a simplified rule Hayabusa can run, surfacing each 4625.
-- `scripts/Detect-BruteForce.ps1` — a PowerShell script that implements the full correlation: groups 4625 events by target account inside a sliding window and alerts when the count meets the threshold, then correlates with the 4740 lockout.
-
-### Logic
-> 5 or more failed logons (4625) against the same account within 5 minutes → alert.
-
-### Result
-The script detected 6 failed logons against the test account, correlated with the account lockout, and mapped it to **MITRE ATT&CK T1110 / T1110.001**.
+**Investigation note:** A detection name does not automatically establish malicious activity. Each alert was compared with its underlying command line and execution context before being classified.
 
 ---
 
-## 4. Network Analysis with Wireshark
+## 3. Custom Detection Engineering
 
-A separate controlled SSH brute force was run against the local SSH service to demonstrate network-level detection.
+### Identifying a detection gap
 
-### Process
-1. Capture on the loopback interface, filtered to port 22:
-   `tshark -i <loopback> -f "tcp port 22" -w ssh-bruteforce.pcapng`
-2. Run repeated failed SSH logons against `127.0.0.1`.
-3. Analyze connection attempts:
-   `tshark -r ssh-bruteforce.pcapng -Y "tcp.flags.syn==1 && tcp.flags.ack==0"`
+During the offline analysis, the default Sigma rules did not generate a single correlated brute-force alert for the sequence of failed Windows logons.
 
-### Network signature of a brute force
-- Many **short-lived TCP sessions** to port 22 from one source, in rapid succession.
-- Sequential source ports, each session tearing down quickly after authentication fails.
-- In this capture: 8 connection attempts within seconds, each a small, quickly-closed session.
+Individual Event ID 4625 records were available, but the desired detection required identifying repeated failures against the same account within a defined time period.
 
-### Honest limitation
-SSH is encrypted, so the packet payload does not reveal the attempted passwords. The **connection pattern** — not the content — is the detectable signature. The source is `127.0.0.1` because the attack was generated locally; in a real incident this would be an external IP.
+This led to the development of additional detection logic.
+
+### Detection rules and scripts
+
+Three files were created:
+
+- `detection-rules/bruteforce_failed_logon_4625.yml`
+
+  A Sigma-style rule documenting the intended threshold-based detection logic using `count()` grouped by `TargetUserName`.
+
+- `detection-rules/failed_logon_4625.yml`
+
+  A simplified rule designed to identify individual Event ID 4625 records in Hayabusa.
+
+- `scripts/Detect-BruteForce.ps1`
+
+  A PowerShell script implementing the correlation logic by grouping failed logons by target account within a sliding time window and checking for a corresponding account lockout event.
+
+The aggregation rule documents the intended detection logic; the PowerShell script performs the actual correlation because the standalone scanner does not evaluate this aggregation in the same way.
+
+### Detection logic
+
+> Five or more failed logon events (4625) against the same account within five minutes trigger an alert.
+
+The script also checks for Event ID 4740 to determine whether the account was subsequently locked out.
+
+### Validation result
+
+During testing, the script identified six failed logon events against the test account and correlated them with the corresponding account lockout event.
+
+The activity was mapped to:
+
+- **T1110:** Brute Force
+- **T1110.001:** Password Guessing
+
+This provided a way to identify repeated authentication failures as a single investigation rather than reviewing each event independently.
 
 ---
 
-## 5. Live Detection with Wazuh (SIEM)
+## 4. Network Traffic Analysis with Wireshark
 
-A full Wazuh 4.14 SIEM (manager + indexer + dashboard) was deployed on a hardened Hetzner cloud server (Ubuntu 24.04, 8 GB RAM). The Windows endpoint ran the Wazuh agent, forwarding its Security and Sysmon event channels over TLS.
+A separate controlled SSH brute-force exercise was performed against the local SSH service to examine how repeated authentication attempts appeared at the network level.
 
-### Deployment & hardening
-- One-line Wazuh installer (`wazuh-install.sh -a`) on a fresh Ubuntu server.
-- **UFW firewall:** default deny inbound; SSH (22), dashboard (443), and agent ports (1514/1515) each restricted to the analyst's single home IP.
-- **Key-only SSH**, no password authentication. Dashboard never exposed to the open internet.
-- Agent installed on the endpoint via MSI, pointed at the manager IP, forwarding `Security` and `Microsoft-Windows-Sysmon/Operational`.
+Wireshark and tshark were used to capture and inspect the traffic.
 
-### Result
-The same controlled brute force was replayed. Within seconds Wazuh showed:
-- **8 authentication failures, 0 successes** (the attack failed).
-- Automatic mapping to **MITRE ATT&CK: Brute Force (T1110)**.
-- Built-in rule **60204 "Multiple Windows Logon Failures"** (level 10) correlating the burst into one alert, alongside the individual **60122** logon-failure events (level 5).
+### Capture procedure
 
-### Key comparison
-Hayabusa's default Sigma rules **did not** correlate the failed-logon burst — a custom rule was needed. **Wazuh correlated it natively, out of the box.** Running both shows an understanding of the trade-offs: a lightweight offline scanner vs. a stateful, real-time SIEM.
+1. Start a packet capture on the loopback interface, filtering for TCP port 22:
+
+   ```bash
+   tshark -i <loopback> -f "tcp port 22" -w ssh-bruteforce.pcapng
+   ```
+
+2. Generate repeated unsuccessful SSH authentication attempts against `127.0.0.1`.
+
+3. Review the captured TCP connection attempts:
+
+   ```bash
+   tshark -r ssh-bruteforce.pcapng -Y "tcp.flags.syn==1 && tcp.flags.ack==0"
+   ```
+
+### Observed network pattern
+
+The capture contained eight connection attempts within a short period.
+
+The traffic showed:
+
+- Repeated TCP connection attempts to destination port 22.
+- Multiple short-lived sessions originating from the same source address.
+- Connections being established and closed within a short interval.
+
+This pattern can be useful when investigating repeated SSH connection attempts, particularly when combined with authentication logs from the target endpoint.
+
+### Investigation limitation
+
+SSH encrypts its authentication traffic. As a result, the packet capture does not expose the passwords entered during authentication.
+
+The network capture provides information about connection timing, source and destination addresses, ports, and TCP behavior. It does not independently confirm whether an authentication attempt succeeded or failed.
+
+In this exercise, the source address was `127.0.0.1` because the activity was generated locally. An externally initiated attack would normally show the corresponding remote source IP address.
 
 ---
 
-## Summary
+## 5. Live Detection with Wazuh SIEM
 
-| Attack stage | Detected by |
-|---|---|
-| Account targeted | Host logs (4625) |
-| Burst correlated as brute force (offline) | Custom PowerShell rule |
-| Burst correlated as brute force (live) | Wazuh rule 60204, auto-mapped to MITRE T1110 |
-| Defensive control confirmed | Host logs (4740) |
-| Network pattern | Wireshark (SYN burst to port 22) |
+A Wazuh 4.14 SIEM environment was deployed on a Hetzner cloud server running Ubuntu 24.04 with 8 GB of RAM.
 
-Each layer reinforces the others: the host logs show *who* and *what*, the custom rule and Wazuh turn raw events into single correlated alerts, and the network capture shows the attack *on the wire*.
+The deployment included:
+
+- Wazuh Manager
+- Wazuh Indexer
+- Wazuh Dashboard
+- Wazuh Agent installed on the Windows endpoint
+
+The Windows agent forwarded the Security and Sysmon event channels to the manager over the configured secure connection.
+
+### Deployment and security configuration
+
+The Wazuh installation was performed using the official installation assistant:
+
+```bash
+bash wazuh-install.sh -a
+```
+
+The cloud server was configured with several access restrictions:
+
+- UFW firewall configured with a default-deny inbound policy.
+- SSH access restricted to the analyst's home IP.
+- Dashboard access restricted to the analyst's home IP.
+- Agent communication ports 1514 and 1515 restricted to the required source address.
+- SSH password authentication disabled in favor of key-based authentication.
+- The dashboard was not made publicly accessible.
+
+The Windows endpoint agent was installed using the MSI package and configured to forward:
+
+- `Security`
+- `Microsoft-Windows-Sysmon/Operational`
+
+### Detection validation
+
+The controlled SSH brute-force scenario was replayed while monitoring the Windows endpoint through Wazuh.
+
+Within seconds, the dashboard displayed:
+
+- **8 authentication failures**
+- **0 successful logons**
+- MITRE ATT&CK mapping to **T1110 — Brute Force**
+- Built-in Wazuh rule **60204**, titled "Multiple Windows Logon Failures", with level 10.
+- Individual logon-failure events associated with rule **60122**, with level 5.
+
+The results showed that Wazuh could identify the repeated authentication failures and correlate them into a higher-level alert without requiring the separate PowerShell correlation script used in the offline workflow.
+
+### Comparison with Hayabusa
+
+The two tools served different purposes during the investigation.
+
+| Capability | Hayabusa | Wazuh |
+|---|---|---|
+| Analysis mode | Offline | Live / centralized |
+| Input | Exported EVTX files | Forwarded endpoint events |
+| Sigma-based detection | Yes | Rule-based detection and integrations |
+| Brute-force correlation in this lab | Custom PowerShell script | Built-in rule 60204 |
+| Centralized dashboard | No | Yes |
+| MITRE ATT&CK mapping | Available | Available |
+
+Hayabusa was useful for reviewing exported logs and building a forensic timeline. Wazuh provided continuous event collection and built-in correlation for the tested authentication scenario.
+
+Using both approaches made it possible to compare offline forensic analysis with centralized SIEM monitoring.
+
+---
+
+## 6. Detection Summary
+
+The following table summarizes how the controlled attack scenario was investigated across the different layers.
+
+| Attack or investigation stage | Detection source | Evidence |
+|---|---|---|
+| Failed authentication attempts | Windows Security logs | Event ID 4625 |
+| Brute-force correlation (offline) | Custom PowerShell script | Five-or-more failures within five minutes |
+| Brute-force correlation (live) | Wazuh | Rule 60204 |
+| Account lockout | Windows Security logs | Event ID 4740 |
+| Network connection pattern | Wireshark / tshark | Repeated TCP connections to port 22 |
+| Process and command activity | Sysmon / Windows audit logs | Process creation and command-line events |
+
+The investigation demonstrated how different telemetry sources can contribute to the same detection workflow.
+
+Windows event logs provided authentication and account activity, PowerShell added correlation to the offline analysis, Wireshark exposed the network connection pattern, and Wazuh provided centralized alerting.
+
+Rather than relying on one detection source, the lab used these tools together to validate suspicious activity and understand what each layer could identify.
